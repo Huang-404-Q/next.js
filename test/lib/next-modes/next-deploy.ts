@@ -15,6 +15,7 @@ import {
   getPnpmSecuritySettings,
   mergeSettingsIntoYaml,
 } from '../pnpm-security-settings'
+import { DeployRuntimeLogs } from './deploy-runtime-logs'
 
 export class NextDeployInstance extends NextInstance {
   private _cliOutput: string
@@ -25,9 +26,12 @@ export class NextDeployInstance extends NextInstance {
   private _restoreDnsLookup: (() => void) | null = null
   private _startPromise: Promise<void> | undefined
   private _npmrcAuthFile: string | undefined
+  private readonly captureRuntimeLogs: boolean
+  private runtimeLogs: DeployRuntimeLogs | undefined
 
   constructor(opts: NextInstanceOpts) {
     super(opts)
+    this.captureRuntimeLogs = opts.captureRuntimeLogs ?? false
 
     if (typeof opts.files === 'string' || opts.files instanceof FileRef) {
       this.env = {
@@ -334,6 +338,15 @@ export class NextDeployInstance extends NextInstance {
     const customLogsScriptPath =
       process.env.NEXT_TEST_DEPLOY_LOGS_SCRIPT_PATH?.trim()
 
+    if (
+      this.captureRuntimeLogs &&
+      (customDeployScriptPath || customLogsScriptPath)
+    ) {
+      throw new Error(
+        'captureRuntimeLogs requires the Vercel deployment provider'
+      )
+    }
+
     // Check if using an existing deployment URL (takes priority)
     if (existingDeployUrl) {
       try {
@@ -373,6 +386,7 @@ export class NextDeployInstance extends NextInstance {
       }
 
       this.parseIdsFromCliOutput()
+      this.startRuntimeLogs(process.env, [])
       return
     }
 
@@ -604,8 +618,7 @@ export class NextDeployInstance extends NextInstance {
     // fixture's `post-build` script prints. The deployment can report `Ready`
     // (and `vercel deploy` can return) before its full build-log tail has
     // propagated to the log query API, so re-query until the markers appear
-    // rather than failing on the first incomplete read. TODO: Combine with
-    // runtime logs (via `vercel logs`)
+    // rather than failing on the first incomplete read.
     this._cliOutput = await this.fetchBuildLogsUntilComplete(
       this._url,
       vercelEnv,
@@ -613,6 +626,23 @@ export class NextDeployInstance extends NextInstance {
     )
 
     this.parseIdsFromCliOutput()
+    this.startRuntimeLogs(vercelEnv, vercelFlags)
+  }
+
+  private startRuntimeLogs(env: NodeJS.ProcessEnv, flags: string[]) {
+    if (!this.captureRuntimeLogs) return
+    this.runtimeLogs = new DeployRuntimeLogs(
+      this._url,
+      { cwd: this.testDir, env, flags },
+      (message, stream) => {
+        if (this._cliOutput && !this._cliOutput.endsWith('\n')) {
+          this._cliOutput += '\n'
+        }
+        this._cliOutput += message
+        process[stream].write(message)
+        this.emit(stream, [message])
+      }
+    )
   }
 
   private writeFixtureConfiguration(filePath: string, contents: string): void {
@@ -980,6 +1010,15 @@ export class NextDeployInstance extends NextInstance {
   }
 
   public async destroy() {
+    // Always release the stream, including when fixture cleanup fails.
+    try {
+      return await this.destroyDeployment()
+    } finally {
+      await this.runtimeLogs?.stop()
+    }
+  }
+
+  private async destroyDeployment() {
     // Run custom cleanup script if provided
     const customCleanupScriptPath =
       process.env.NEXT_TEST_CLEANUP_SCRIPT_PATH?.trim()
@@ -1028,6 +1067,7 @@ export class NextDeployInstance extends NextInstance {
   }
 
   public get cliOutput() {
+    this.runtimeLogs?.assertHealthy()
     return this._cliOutput || ''
   }
 
