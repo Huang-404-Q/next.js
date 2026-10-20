@@ -2460,7 +2460,8 @@ describe.each(
             // The shared parent of the middleware span: the incoming
             // `traceparent` (not exported here), the host span, or, without
             // either, the root inserted by the middleware adapter, backdated
-            // to cover registration.
+            // to cover registration. The middleware triggered registration, so
+            // the lifecycle spans are its children.
             const parent = byId.get(middlewareSpan.parentId!)
             if (coldTraceparent) {
               expect(parent).toBeUndefined()
@@ -2485,15 +2486,18 @@ describe.each(
               expect(lifecycleSpans).toEqual([
                 expect.objectContaining({
                   name,
-                  // Siblings of the middleware span.
-                  parentId: middlewareSpan.parentId,
+                  parentId: middlewareSpan.id,
                   traceId: middlewareSpan.traceId,
                   status: { code: 0 },
                 }),
               ])
+              // The middleware span is backdated to cover registration.
+              expect(middlewareSpan.timestamp!).toBeLessThanOrEqual(
+                lifecycleSpans[0].timestamp!
+              )
               if (parent) {
                 expect(parent.timestamp!).toBeLessThanOrEqual(
-                  lifecycleSpans[0].timestamp!
+                  middlewareSpan.timestamp!
                 )
               }
             }
